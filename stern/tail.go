@@ -21,12 +21,11 @@ import (
 	"hash/fnv"
 	"os"
 	"regexp"
-	"text/template"
 
 	"github.com/fatih/color"
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/client-go/kubernetes/typed/core/v1"
+	v1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/rest"
 )
 
@@ -39,7 +38,6 @@ type Tail struct {
 	closed         chan struct{}
 	podColor       *color.Color
 	containerColor *color.Color
-	tmpl           *template.Template
 }
 
 type TailOptions struct {
@@ -51,14 +49,13 @@ type TailOptions struct {
 }
 
 // NewTail returns a new tail for a Kubernetes container inside a pod
-func NewTail(namespace, podName, containerName string, tmpl *template.Template, options *TailOptions) *Tail {
+func NewTail(namespace, podName, containerName string, options *TailOptions) *Tail {
 	return &Tail{
 		Namespace:     namespace,
 		PodName:       podName,
 		ContainerName: containerName,
 		Options:       options,
 		closed:        make(chan struct{}),
-		tmpl:          tmpl,
 	}
 }
 
@@ -81,7 +78,7 @@ func determineColor(podName string) (podColor, containerColor *color.Color) {
 }
 
 // Start starts tailing
-func (t *Tail) Start(ctx context.Context, i v1.PodInterface) {
+func (t *Tail) Start(ctx context.Context, i v1.PodInterface, logC chan<- *Log) {
 	t.podColor, t.containerColor = determineColor(t.PodName)
 
 	go func() {
@@ -114,24 +111,20 @@ func (t *Tail) Start(ctx context.Context, i v1.PodInterface) {
 			stream.Close()
 		}()
 
-		reader := bufio.NewReader(stream)
+		scanner := bufio.NewScanner(stream)
 
-	OUTER:
-		for {
-			line, err := reader.ReadBytes('\n')
-			if err != nil {
-				return
-			}
-
-			str := string(line)
-
+		for scanner.Scan() {
+			str := scanner.Text()
+			accept := true
 			for _, rex := range t.Options.Exclude {
 				if rex.MatchString(str) {
-					continue OUTER
+					accept = false
+					break
 				}
 			}
-
-			t.Print(str)
+			if accept {
+				logC <- t.toLog(str)
+			}
 		}
 	}()
 
@@ -153,19 +146,14 @@ func (t *Tail) Close() {
 	close(t.closed)
 }
 
-// Print prints a color coded log message with the pod and container names
-func (t *Tail) Print(msg string) {
-	vm := Log{
+func (t *Tail) toLog(msg string) *Log {
+	return &Log{
 		Message:        msg,
 		Namespace:      t.Namespace,
 		PodName:        t.PodName,
 		ContainerName:  t.ContainerName,
 		PodColor:       t.podColor,
 		ContainerColor: t.containerColor,
-	}
-	err := t.tmpl.Execute(os.Stdout, vm)
-	if err != nil {
-		os.Stderr.WriteString(fmt.Sprintf("expanding template failed: %s", err))
 	}
 }
 

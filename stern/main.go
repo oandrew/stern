@@ -15,7 +15,10 @@
 package stern
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"os"
 
 	"github.com/pkg/errors"
 	"github.com/wercker/stern/kubernetes"
@@ -49,6 +52,27 @@ func Run(ctx context.Context, config *Config) error {
 	}
 
 	tails := make(map[string]*Tail)
+	logC := make(chan *Log, 1024)
+
+	go func() {
+		var buf bytes.Buffer
+		for {
+			select {
+			case vm := <-logC:
+				buf.Reset()
+				err := config.Template.Execute(&buf, vm)
+				if err != nil {
+					os.Stderr.WriteString(fmt.Sprintf("expanding template failed: %s", err))
+					continue
+				}
+				buf.WriteByte('\n')
+				buf.WriteTo(os.Stdout)
+
+			case <-ctx.Done():
+				break
+			}
+		}
+	}()
 
 	go func() {
 		for p := range added {
@@ -57,7 +81,7 @@ func Run(ctx context.Context, config *Config) error {
 				continue
 			}
 
-			tail := NewTail(p.Namespace, p.Pod, p.Container, config.Template, &TailOptions{
+			tail := NewTail(p.Namespace, p.Pod, p.Container, &TailOptions{
 				Timestamps:   config.Timestamps,
 				SinceSeconds: int64(config.Since.Seconds()),
 				Exclude:      config.Exclude,
@@ -66,7 +90,7 @@ func Run(ctx context.Context, config *Config) error {
 			})
 			tails[id] = tail
 
-			tail.Start(ctx, clientset.Core().Pods(p.Namespace))
+			tail.Start(ctx, clientset.Core().Pods(p.Namespace), logC)
 		}
 	}()
 
